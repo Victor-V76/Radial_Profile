@@ -1,0 +1,87 @@
+#Install packages
+
+if(!"sf" %in% installed.packages()){install.packages("sf")}
+if(!"dplyr" %in% installed.packages()){install.packages("dplyr")}
+if(!"tidyverse" %in% installed.packages()){install.packages("tidyverse")}
+library(sf)
+library(dplyr)
+library(tidyverse)
+
+#Load Data
+
+center_layer <- st_read("~/R_Gradients/Bretagne/Centers_Normandy.gpkg")
+
+vector <- st_read("~/R_Gradients/Bretagne/normandie.gpkg")
+
+profile <- make.profile.v (center_layer, 
+                           vector, 
+                           width = 250, 
+                           max_distance = 100000, 
+                           buffer = FALSE,
+                           no_column_name = 1)
+
+##Make.profile.v : base----
+
+make.profile.v <- function (center_layer,
+                            vector,
+                            width = 250,
+                            max_distance = 100000,
+                            buffer = FALSE,
+                            no_column_name = NA) {  
+  
+  # creation of the results table
+  profile_v_table <- as.data.frame(seq(from = (width/2)/1000,
+                                       to = 100,
+                                       by = width/1000))
+  colnames(profile_v_table)[1] <- 'dist'
+  
+  # name of the columns if the argument is precised by the user
+  ifelse(!is.na(no_column_name),
+         vec <- center_layer[, no_column_name] %>% st_drop_geometry() %>% pull(),
+         vec <- c(1:nrow(center_layer)))
+  
+  xy_center <- st_coordinates(center_layer) %>% data.frame()
+  
+  for(i in 1:nrow(center_layer)) {
+    
+    # buffer and intersection option
+    if (buffer == TRUE){
+      
+      draw_buffer <- st_buffer(center_layer[i,], dist = max_distance)
+      
+      vector$in_buffer <- st_intersects(x = vector, draw_buffer, sparse = FALSE)
+      
+      vector_city <- filter (vector, in_buffer == TRUE)
+      
+    } else { vector_city = vector } 
+    
+    xy_vector <- st_coordinates(vector_city) %>% data.frame()
+    
+    # Cartesian distance
+    vector_city$distance <- (((xy_vector[,1] - xy_center[i,1])^2) + 
+                               ((xy_vector[,2] - xy_center[i,2])^2))^0.5
+    
+    vector_city <- vector_city %>% filter (distance < max_distance) 
+    
+    # divide distance by the radius of the buffer
+    vector_city$distance <- (vector_city$distance)/width
+    
+    # round values up to the highest integer
+    vector_city$distance <- ceiling(vector_city$distance)
+    
+    # summarize data for every ring
+    Synth_data <- vector_city %>%
+      dplyr::group_by(distance) %>%
+      dplyr::summarise(city = median(prix_m2)) %>%
+      as.data.frame()
+    
+    colnames(Synth_data)[2] <- vec[i]
+    
+    # biding table with results
+    profile_v_table <- cbindX(profile_v_table, Synth_data[2])
+    
+  }
+  
+  return(profile_v_table)
+  
+}
