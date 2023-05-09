@@ -1,0 +1,158 @@
+#clear workspace
+rm(list = ls())
+
+#load packages
+library(terra)
+library(sf)
+
+#load raster data
+r_ghsl <- rast("D:/Spatial_data/Radial_analysis/Workshop/ghsl_sample/ghsl.tif")
+
+#import centres - CBDs
+centres <- read.csv("D:/Spatial_data/centres/urban_atlas_all_v3.csv", header = TRUE, sep = ",")
+#subset centres - using urban atlas 2018
+year = 2018
+dataset = "urban atlas"
+#subset centre
+if (year==0){centres=centres} else {centres <- centres[ which(centres$year==year),]}
+if (dataset==0){centres=centres} else {centres <- centres[ which(centres$data==dataset),]}
+#transform to spatial object using x y co-ordinates in EPSG:3035
+cent_sf <- st_as_sf(centres, coords = c("x", "y"), crs = 3035)
+#subset number of columns
+cent_sf <- cent_sf[c(1:4,14:15)]
+  
+# Function to convert sf object to vect object if not already a vect object
+convert_to_vect <- function(spatial_obj) {
+  if (inherits(spatial_obj, "sf")) {
+    # Convert sf object to vect object
+    vect_obj <- vect(spatial_obj)
+    return(vect_obj)
+  } else if (inherits(spatial_obj, "SpatVector")) {
+    # If already a vect object, return the object unchanged
+    return(spatial_obj)
+  } else {
+    # If the object is neither sf nor vect, return an error message
+    stop("Input object must be of class 'sf' or 'SpatVector'")
+  }
+}
+
+#function to carry out radial analysis
+radial_indivi <- function(cent1, raster1,progress_bar, step = 1) {
+  
+  raster2 <- raster1
+  #check if centres file has a city name
+  if ("city" %in% names(cent1)) {
+    city_name <- cent1$city
+  } else {
+    # If 'city' variable is not available, use the iteration number (e.g., city_1)
+    city_name <- paste("city", step, sep = "_")
+  }
+  print(paste("Starting Analysis for ",city_name, "cities."))
+  #30km buffer
+  buff_30km <- buffer(cent1,30000)
+  #crop and mask raster using buffer
+  vol_data <- crop(raster2,buff_30km)
+  vol_data <- mask(vol_data,buff_30km)
+  #remove NAs ###
+  vol_data <- na.omit(vol_data)
+  
+  #get distance from centre to raster cells
+  r9 <- rast(vol_data)
+  d1 <- distance(r9, cent1)
+  #crop distance raster using input raster
+  d1 <- crop(d1,vol_data)
+  d1 <- mask(d1,vol_data)
+  
+  #round to nearest 1000
+  values(d1) <- round((values(d1))/1000)*1000 
+  name1 <- as.character(names(raster2)[1])
+  #zonal analysis - raster - distance - mean/sum
+  urban<-zonal(vol_data, d1, "mean",na.rm=T)
+  #calculate number of cells
+  urban$nringcells<-freq(d1)[,3]
+  #rename columns
+  colnames(urban)[1] <- "distance"
+  colnames(urban)[2] <- "mean_value"
+  #get cityname
+  urban$city <- city_name
+  #what raster was used
+  urban$ras_name <- names(raster2)
+  #return results
+  return(urban)
+  #update progress bar
+  setTxtProgressBar(progress_bar, step)
+}
+
+#function to perform on centres and raster data
+radial_profiles <- function(cents_all, raster1) {
+  #setting up data
+ 
+  #convert centre to SpaVect object
+  cents_all <- convert_to_vect(cents_all)
+  
+  # Check if the raster and vector have the same CRS
+  if (crs(raster1) != crs(cents_all)) {
+    # Transform the vector to the same CRS as the raster
+    cents_all <- project(cents_all, crs(raster1))
+    # Now, the vector has the same CRS as the raster
+    cat("Vector CRS has been transformed to match the raster CRS.\n")
+  } else if(crs(cents_all) == crs(raster1)){
+    my_crs <- crs(raster1)
+    # Extract the EPSG code from the CRS
+    epsg_code <- gsub(".*EPSG*", "\\1", my_crs)
+    # Keep only numeric characters
+    epsg_code <- gsub("\\D", "", epsg_code)
+    message_crs <- paste("Raster and vector already have the same CRS.\n","EPSG: ",epsg_code)
+    cat(message_crs)
+  } else {
+    stop("Input (raster/vector) missing crs")
+  }
+  
+  #crop centres using raster.
+  cents_all <- crop(cents_all,raster1)
+  #Check if centres and rasters overlap
+  # Check if the SpatVector has zero observations (rows)
+  if (nrow(cents_all) == 0) {
+    stop("The SpatVector has zero observations (rows).\n")
+  } else {
+    cat("The SpatVector has", nrow(cents_all), "observations (rows).\n")
+  }
+  #start analysis
+  #get number of cities
+  no_city <- nrow(cents_all)
+  #get number of rasters
+  no_rast <- 1
+  #estimate no of steps to complete
+  n_steps <- no_city * no_rast  # Adjust this to the number of iterations/steps in your function
+  progress_bar <- txtProgressBar(min = 0, max = n_steps, style = 3)
+  
+  #input centres and rasters
+  cents_new <- cents_all
+  input_raster <- raster1
+  step <- 1
+  
+  closest_point_list <- lapply(1:nrow(cents_new), function(i) {
+    lapply(names(input_raster), function(ras_name) { # <-- CHANGE HERE: replace ras_list with input_raster
+      result <- radial_indivi(cents_new[i, ], input_raster[[ras_name]], progress_bar, step) # <-- CHANGE HERE: replace ras_list with input_raster
+      step <<- step + 1
+      return(result)
+    })
+  })
+  #return(closest_point_list)
+}
+
+
+#
+input_centre <- cent_sf
+input_raster <-   r_ghsl
+
+output <- radial_profiles(input_centre, input_raster)
+# perform analysis
+
+# Flatten the list
+flattened_list <- unlist(output, recursive = FALSE)
+
+# Combine data frames into a single data frame
+combined_df <- do.call(rbind, flattened_list)
+
+write.csv(combined_df,"D:/Spatial_data/Radial_analysis/Workshop/city_profiles_terra.csv", row.names = FALSE)
